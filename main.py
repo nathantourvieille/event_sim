@@ -1,7 +1,5 @@
-import sys
 import cv2
-import gc
-import torch
+
 import time
 # https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.simulation_app/docs/index.html
 from isaacsim.simulation_app import SimulationApp
@@ -15,23 +13,35 @@ CONFIG = {
 }
 simulation_app = SimulationApp(CONFIG)
 import omni.replicator.core as rep
+import omni.timeline
 
 from sim_orchestrator import setup_isaac_environment, configure_carb_settings, update_camera_position
 from event_kernel import WarpEventCameraSimulator
 from visualizer import visualize_event_frame_live
 
+
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+BENCHMARK_MODE = True  # Set to True to uncap FPS and test hardware limits
+MAX_FPS = 60        # 80% of the max FPS found when BENCHMARK_MODE was True
+
+SIM_FPS = 100         # Desired polling rate for the event camera
+# ==========================================
+
 def main():
     print("[INIT] Booting Standalone Event Simulation Pipeline...")
 
     # 1. Lock the physics and rendering steps (e.g., dt = 0.01s / 100Hz)
-    configure_carb_settings(physics_dt=0.02, rendering_dt=0.02)
+    configure_carb_settings(physics_dt=0.02, rendering_dt=0.02, sim_fps=SIM_FPS, max_fps=MAX_FPS)
    
     # 2. Build the world and return the camera prim path
     # (This hides all the messy USD and lighting setup)
     camera_path = setup_isaac_environment()
    
     # 3. Instantiate the Warp-based event simulator
-    event_sim = WarpEventCameraSimulator(width=640, height=360, threshold=0.10)
+    event_sim = WarpEventCameraSimulator(width=640, height=360, threshold=0.20)
    
     # 4. Create the Render Product and attach the Annotator
     render_product = rep.create.render_product(camera_path, resolution=(640, 360))
@@ -42,10 +52,11 @@ def main():
    
     frame_idx = 0
 
-    cv2.namedWindow("Live Event Camera", cv2.WINDOW_AUTOSIZE)
-    cv2.startWindowThread() # <--- THIS IS THE CRITICAL FIX
-
-    print("OpenCV Window Thread Started. Initializing Isaac Sim...")
+    # Benchmark trackers
+    if BENCHMARK_MODE:
+        print("\n[WARNING] BENCHMARK MODE ACTIVE. Rate limiter is DISABLED. GPU will run at 100%.")
+        start_time = time.time()
+        frames_this_second = 0
    
     # 5. The Ghost Kitchen Loop (Dedicated thread, maximum execution speed)
     while simulation_app.is_running():
@@ -77,18 +88,24 @@ def main():
             # E. Live validation
             keep_running = visualize_event_frame_live(events_out_wp)
            
-            # if not keep_running:
-            #     print("\n[STOP] User interrupted via OpenCV window. Exiting loop.")
-            #     break
-
+            if not keep_running:
+                print("\n[STOP] User interrupted via OpenCV window. Exiting loop.")
+                break
+            # --- BENCHMARK LOGIC ---
+            if BENCHMARK_MODE:
+                frames_this_second += 1
+                current_time = time.time()
+                if current_time - start_time >= 1.0:
+                    print(f"Hardware Test | MAX UNCAPPED FPS: {frames_this_second}")
+                    frames_this_second = 0
+                    start_time = current_time
+            # -----------------------
             time.sleep(0.2) 
             frame_idx += 1
            
             if frame_idx % 100 == 0:
                 print(f"Processed {frame_idx} frames...")
-                # gc.collect()
-                # if torch.cuda.is_available():
-                #     torch.cuda.empty_cache()
+
 
         except KeyboardInterrupt:
             print("\n[STOP] Keyboard interrupt detected. Exiting loop.")
@@ -97,10 +114,7 @@ def main():
     # 6. Clean up windows before closing
     cv2.destroyAllWindows()
     rep.orchestrator.stop()
-    import omni.timeline
     omni.timeline.get_timeline_interface().stop()
-    from omni.isaac.core.world import World
-    World.clear_instance()
     simulation_app.close()
 
     print("[CLEANUP] Simulation terminated successfully.")
