@@ -1,13 +1,6 @@
 import warp as wp
 
 @wp.kernel
-def test_paint_green(bgr_out: wp.array(dtype=wp.uint8, ndim=3)):
-    y, x = wp.tid()
-    bgr_out[y, x, 0] = wp.uint8(0)   # Blue
-    bgr_out[y, x, 1] = wp.uint8(255) # Green
-    bgr_out[y, x, 2] = wp.uint8(0)   # Red
-
-@wp.kernel
 def compute_event_mask(
     current_frame: wp.array(dtype=wp.uint8, ndim=3),
     last_fired_frame: wp.array(dtype=wp.float32, ndim=2),
@@ -16,10 +9,6 @@ def compute_event_mask(
     threshold: float
 ):
     y, x = wp.tid()
-    
-    # Bounds check
-    if y >= current_frame.shape[0] or x >= current_frame.shape[1]:
-        return
    
     r = float(current_frame[y, x, 0])
     g = float(current_frame[y, x, 1])

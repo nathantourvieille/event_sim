@@ -27,14 +27,14 @@ from visualizer import visualize_event_frame_live
 BENCHMARK_MODE = True  # Set to True to uncap FPS and test hardware limits
 MAX_FPS = 60        # 80% of the max FPS found when BENCHMARK_MODE was True
 
-SIM_FPS = 100         # Desired polling rate for the event camera
+SIM_FPS = 250         # Desired polling rate for the event camera in sim time
 # ==========================================
 
 def main():
     print("[INIT] Booting Standalone Event Simulation Pipeline...")
 
-    # 1. Lock the physics and rendering steps (e.g., dt = 0.01s / 100Hz)
-    configure_carb_settings(physics_dt=0.02, rendering_dt=0.02, sim_fps=SIM_FPS, max_fps=MAX_FPS)
+    # 1. Lock the physics and rendering steps 
+    configure_carb_settings(sim_fps=SIM_FPS, max_fps=MAX_FPS)
    
     # 2. Build the world and return the camera prim path
     # (This hides all the messy USD and lighting setup)
@@ -70,7 +70,7 @@ def main():
             # B. Fire Replicator to harvest the data for THIS exact state.
             # https://docs.omniverse.nvidia.com/kit/docs/omni_replicator/latest/source/extensions/omni.replicator.core/docs/API.html#omni.replicator.core.orchestrator.step
             # delta_time=0.0 ensures Replicator grabs the buffer without double-stepping the physics timeline.
-            # wait_for_render=True ensures the Python execution thread blokcs until the GPU is done
+            # wait_for_render=True ensures the Python execution thread blocks until the GPU is done
             # pause_timeline=True ensures the Omniverse timeline clock is frozen
             # rt_subframes=-1 ensures it uses the modified carb settings
             rep.orchestrator.step(delta_time=0.0, wait_for_render=True, pause_timeline=True, rt_subframes=-1)
@@ -86,11 +86,11 @@ def main():
             events_out_wp = event_sim.process_frame(rgb_data)
            
             # E. Live validation
-            keep_running = visualize_event_frame_live(events_out_wp)
+            # keep_running = visualize_event_frame_live(events_out_wp)
            
-            if not keep_running:
-                print("\n[STOP] User interrupted via OpenCV window. Exiting loop.")
-                break
+            # if not keep_running:
+            #     print("\n[STOP] User interrupted via OpenCV window. Exiting loop.")
+            #     break
             # --- BENCHMARK LOGIC ---
             if BENCHMARK_MODE:
                 frames_this_second += 1
@@ -100,7 +100,7 @@ def main():
                     frames_this_second = 0
                     start_time = current_time
             # -----------------------
-            time.sleep(0.2) 
+            # time.sleep(0.2) 
             frame_idx += 1
            
             if frame_idx % 100 == 0:

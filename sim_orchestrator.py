@@ -2,6 +2,7 @@ import os
 import carb
 import math
 from pxr import UsdGeom, Gf
+
 # https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.core.utils/docs/index.html#isaacsim.core.utils.stage.create_new_stage
 # https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.core.utils/docs/index.html#isaacsim.core.utils.stage.get_current_stage
 from isaacsim.core.utils.stage import create_new_stage, get_current_stage, add_reference_to_stage
@@ -9,17 +10,24 @@ from isaacsim.core.utils.prims import create_prim
 from isaacsim.storage.native import get_assets_root_path
 from pxr import Gf
 
-import carb
 
-def configure_carb_settings(physics_dt=0.01, rendering_dt=0.01, sim_fps=1, max_fps=None):
-    print(f"[SHIM] Locking simulation time steps to dt = {physics_dt}s")
+def configure_carb_settings(sim_fps=100, max_fps=None):
+    print(f"[SHIM] Locking simulation time steps to dt = {1 / sim_fps}s")
     settings = carb.settings.get_settings()
     
     # 1. Enforce fixed-step physics and rendering updates
-    settings.set("/physics/maxStepSize", physics_dt)
-    settings.set("/physics/minFrameRate", int(1.0 / physics_dt))
-    settings.set("/physics/updateTicksPerFrame", 1)
-    settings.set("/app/runLoops/main/rateLimitFrequency", int(1.0 / rendering_dt))
+    # If we know what the hardware can handle, we set that as the max so that the GPU is always safe
+    if max_fps:
+        settings.set("/app/runLoops/main/rateLimitEnabled",True)
+        settings.set("/app/runLoops/main/rateLimitFrequency", max_fps) 
+
+        settings.set("/time/timeScale", max_fps / sim_fps)  # Speed up the simulation time to maintain event density
+
+    # settings.set("/physics/maxStepSize", 1 / sim_fps)
+    # settings.set("/physics/minFrameRate", sim_fps)
+    # settings.set("/physics/updateTicksPerFrame", 1)
+    # settings.set("/physics/updateToCoreTime", False)
+    settings.set("/app/asyncRendering", False)
     settings.set("/omni/replicator/asyncRendering", False)
 
     # 2. Disable RTX Shadows & Ambient Occlusion (Performance)
@@ -36,11 +44,7 @@ def configure_carb_settings(physics_dt=0.01, rendering_dt=0.01, sim_fps=1, max_f
     settings.set("/rtx/post/lensFlares/enabled", False)
     settings.set("/rtx/post/chromaticAberration/enabled", False)
 
-    if max_fps:
-        carb.settings.get_settings().set("/app/runLoops/main/rateLimitEnabled",True)
-        carb.settings.get_settings().set("/app/runLoops/main/rateLimitFrequency", max_fps) 
-
-        carb.settings.get_settings().set("/time/timeScale", sim_fps / max_fps)  # Speed up the simulation time to maintain event density
+    
 
 
 
