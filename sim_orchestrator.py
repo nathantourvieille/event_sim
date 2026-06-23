@@ -17,11 +17,11 @@ def configure_carb_settings(sim_fps=100, max_fps=None):
     
     # 1. Enforce fixed-step physics and rendering updates
     # If we know what the hardware can handle, we set that as the max so that the GPU is always safe
-    if max_fps:
-        settings.set("/app/runLoops/main/rateLimitEnabled",True)
-        settings.set("/app/runLoops/main/rateLimitFrequency", max_fps) 
+    # if max_fps:
+    #     settings.set("/app/runLoops/main/rateLimitEnabled",True)
+    #     settings.set("/app/runLoops/main/rateLimitFrequency", max_fps) 
 
-        settings.set("/time/timeScale", max_fps / sim_fps)  # Speed up the simulation time to maintain event density
+    #     settings.set("/time/timeScale", max_fps / sim_fps)  # Speed up the simulation time to maintain event density
 
     # settings.set("/physics/maxStepSize", 1 / sim_fps)
     # settings.set("/physics/minFrameRate", sim_fps)

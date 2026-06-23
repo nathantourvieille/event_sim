@@ -1,6 +1,8 @@
 import cv2
-
 import time
+
+
+
 # https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.simulation_app/docs/index.html
 from isaacsim.simulation_app import SimulationApp
 
@@ -12,6 +14,16 @@ CONFIG = {
     "height": 1080,
 }
 simulation_app = SimulationApp(CONFIG)
+from omni.isaac.core.utils.extensions import enable_extension
+enable_extension("isaacsim.ros2.bridge")
+
+# ROS imports
+import rclpy
+from rosgraph_msgs.msg import Clock
+
+# 3. Give the engine a tick to process the extension loading
+simulation_app.update()
+
 import omni.replicator.core as rep
 import omni.timeline
 
@@ -51,6 +63,16 @@ def main():
     print("[INIT] Pipeline established. Entering synchronous execution loop.")
    
     frame_idx = 0
+    sim_time = 0.0
+
+    # 1. Initialize ROS 2 in your python script
+    rclpy.init()
+
+    # 2. Create your own node specifically for broadcasting the clock
+    clock_node = rclpy.create_node("isaac_adaptive_clock")
+
+    # 3. Create the publisher on that node
+    clock_pub = clock_node.create_publisher(Clock, "/clock", 10)
 
     # Benchmark trackers
     if BENCHMARK_MODE:
@@ -63,6 +85,7 @@ def main():
         try:
             # A. You drive the engine. This executes your 0.01s physics tick and renders the scene.
             simulation_app.update()
+            sim_time += 0.01
             
             # A1. Move the camera (simple)
             update_camera_position(camera_path, frame_idx)
@@ -102,6 +125,17 @@ def main():
             # -----------------------
             # time.sleep(0.2) 
             frame_idx += 1
+
+            msg = Clock()
+
+            sec = int(sim_time)                    
+            nanosec = int((sim_time - sec) * 1e9)   
+
+            msg.clock.sec = sec
+            msg.clock.nanosec = nanosec
+
+            clock_pub.publish(msg)
+            rclpy.spin_once(clock_node, timeout_sec=0.0)
            
             if frame_idx % 100 == 0:
                 print(f"Processed {frame_idx} frames...")
@@ -113,6 +147,10 @@ def main():
        
     # 6. Clean up windows before closing
     cv2.destroyAllWindows()
+
+    clock_node.destroy_node()
+    rclpy.shutdown()
+
     rep.orchestrator.stop()
     omni.timeline.get_timeline_interface().stop()
     simulation_app.close()
