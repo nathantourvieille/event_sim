@@ -27,6 +27,7 @@ simulation_app.update()
 import omni.replicator.core as rep
 import omni.timeline
 
+from event_publisher_node import EventPublisherNode
 from sim_orchestrator import setup_isaac_environment, configure_carb_settings, update_camera_position
 from event_kernel import WarpEventCameraSimulator
 from visualizer import visualize_event_frame_live
@@ -54,7 +55,8 @@ def main():
    
     # 3. Instantiate the Warp-based event simulator
     event_sim = WarpEventCameraSimulator(width=640, height=360, threshold=0.20)
-   
+    event_publisher = EventPublisherNode()
+
     # 4. Create the Render Product and attach the Annotator
     render_product = rep.create.render_product(camera_path, resolution=(640, 360))
     rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cuda")
@@ -86,6 +88,17 @@ def main():
             # A. You drive the engine. This executes your 0.01s physics tick and renders the scene.
             simulation_app.update()
             sim_time += 0.01
+
+            msg = Clock()
+
+            sec = int(sim_time)                    
+            nanosec = int((sim_time - sec) * 1e9)   
+
+            msg.clock.sec = sec
+            msg.clock.nanosec = nanosec
+
+            clock_pub.publish(msg)
+            rclpy.spin_once(clock_node, timeout_sec=0.0)
             
             # A1. Move the camera (simple)
             update_camera_position(camera_path, frame_idx)
@@ -104,11 +117,12 @@ def main():
             # do_array_copy ensures a copy of the frame is made in case the events_out_wp is not computed in time
             rgb_data = rgb_annotator.get_data(device="cuda", do_array_copy=False)
            
-
+            dt_ns = int(0.01 * 1e9)
             # D. Route to your custom NVIDIA Warp kernel
-            events_out_wp = event_sim.process_frame(rgb_data)
-           
+            events_1d = event_sim.process_frame(rgb_data, )
+            event_publisher.publish_events(events_1d, sec, nanosec, width=640, height=360)
             # E. Live validation
+            # events_out_wp = event_sim.process_frame(rgb_data)
             # keep_running = visualize_event_frame_live(events_out_wp)
            
             # if not keep_running:
@@ -125,17 +139,6 @@ def main():
             # -----------------------
             # time.sleep(0.2) 
             frame_idx += 1
-
-            msg = Clock()
-
-            sec = int(sim_time)                    
-            nanosec = int((sim_time - sec) * 1e9)   
-
-            msg.clock.sec = sec
-            msg.clock.nanosec = nanosec
-
-            clock_pub.publish(msg)
-            rclpy.spin_once(clock_node, timeout_sec=0.0)
            
             if frame_idx % 100 == 0:
                 print(f"Processed {frame_idx} frames...")
