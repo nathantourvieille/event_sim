@@ -15,13 +15,13 @@ CONFIG = {
 }
 simulation_app = SimulationApp(CONFIG)
 
-# Initialize DDS network
-from omni.isaac.core.utils.extensions import enable_extension
-enable_extension("isaacsim.ros2.bridge")
+# # Initialize DDS network
+# from omni.isaac.core.utils.extensions import enable_extension
+# enable_extension("isaacsim.ros2.bridge")
 
-# ROS imports
-import rclpy
-from rosgraph_msgs.msg import Clock
+# # ROS imports
+# import rclpy
+# from rosgraph_msgs.msg import Clock
 
 # 3. Give the engine a tick to process the extension loading
 simulation_app.update()
@@ -29,7 +29,7 @@ simulation_app.update()
 import omni.replicator.core as rep
 import omni.timeline
 
-from event_publisher_node import EventPublisherNode
+# from event_publisher_node import EventPublisherNode
 from sim_orchestrator import setup_isaac_environment, configure_carb_settings, update_camera_position
 from event_kernel import WarpEventCameraSimulator
 from visualizer import visualize_event_frame_live
@@ -52,11 +52,11 @@ def main():
     # 2. Build the world and return the camera prim path
     camera_path = setup_isaac_environment()
    
-    # 3. Initialize ROS 2 and create ROS nodes and publishers
-    rclpy.init()
-    event_publisher = EventPublisherNode()
-    clock_node = rclpy.create_node("isaac_adaptive_clock")
-    clock_pub = clock_node.create_publisher(Clock, "/clock", 10)
+    # # 3. Initialize ROS 2 and create ROS nodes and publishers
+    # rclpy.init()
+    # event_publisher = EventPublisherNode()
+    # clock_node = rclpy.create_node("isaac_adaptive_clock")
+    # clock_pub = clock_node.create_publisher(Clock, "/clock", 10)
 
     # 4. Create the Render Product and attach the Annotator
     render_product = rep.create.render_product(camera_path, resolution=(640, 360))
@@ -84,15 +84,15 @@ def main():
             simulation_app.update()
             sim_time += 0.01
 
-            # B. Update the clock time and publish
-            msg = Clock()
-            sec = int(sim_time)                    
-            nanosec = int((sim_time - sec) * 1e9)   
-            msg.clock.sec = sec
-            msg.clock.nanosec = nanosec
+            # # B. Update the clock time and publish
+            # msg = Clock()
+            # sec = int(sim_time)                    
+            # nanosec = int((sim_time - sec) * 1e9)   
+            # msg.clock.sec = sec
+            # msg.clock.nanosec = nanosec
 
-            clock_pub.publish(msg)
-            rclpy.spin_once(clock_node, timeout_sec=0.0)
+            # clock_pub.publish(msg)
+            # rclpy.spin_once(clock_node, timeout_sec=0.0)
             
             # C. Move the camera 
             update_camera_position(camera_path, frame_idx)
@@ -115,8 +115,8 @@ def main():
             dt_ns = int(0.01 * 1e9)
             events_1d = event_sim.process_frame(rgb_data, dt_ns)
 
-            # G. Broadcast events
-            event_publisher.publish_events(events_1d, sec, nanosec, width=640, height=360)
+            # # G. Broadcast events
+            # event_publisher.publish_events(events_1d, sec, nanosec, width=640, height=360)
 
             # --- BENCHMARK LOGIC ---
             if BENCHMARK_MODE:
@@ -141,9 +141,9 @@ def main():
     # 6. Clean up windows before closing
     cv2.destroyAllWindows()
 
-    event_publisher.destroy_node()
-    clock_node.destroy_node()
-    rclpy.shutdown()
+    # event_publisher.destroy_node()
+    # clock_node.destroy_node()
+    # rclpy.shutdown()
 
     rep.orchestrator.stop()
     omni.timeline.get_timeline_interface().stop()
