@@ -18,11 +18,9 @@ class EventPublisherNode(Node):
         msg.height = height
         msg.is_bigendian = False 
         
-        # You will need to specify the exact encoding your byte array uses
-        # e.g., 'bif' (Binary Image Format) or a custom string defined by your packing logic
-        msg.encoding = "custom_byte_encoding" 
+        msg.encoding = "mono" 
         
-        # Bring data from GPU (Warp) to CPU (Host) for standard ROS publishing
-        msg.events = event_byte_array.numpy().tobytes()
-        
+        # Strip away NumPy metadata 
+        msg.events = event_byte_array.tobytes()  
+              
         self.publisher_.publish(msg)

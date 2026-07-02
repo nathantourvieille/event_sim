@@ -14,6 +14,8 @@ CONFIG = {
     "height": 1080,
 }
 simulation_app = SimulationApp(CONFIG)
+
+# Initialize DDS network
 from omni.isaac.core.utils.extensions import enable_extension
 enable_extension("isaacsim.ros2.bridge")
 
@@ -32,8 +34,6 @@ from sim_orchestrator import setup_isaac_environment, configure_carb_settings, u
 from event_kernel import WarpEventCameraSimulator
 from visualizer import visualize_event_frame_live
 
-
-
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -50,31 +50,26 @@ def main():
     configure_carb_settings(sim_fps=SIM_FPS, max_fps=MAX_FPS)
    
     # 2. Build the world and return the camera prim path
-    # (This hides all the messy USD and lighting setup)
     camera_path = setup_isaac_environment()
    
-    # 3. Instantiate the Warp-based event simulator
-    event_sim = WarpEventCameraSimulator(width=640, height=360, threshold=0.20)
+    # 3. Initialize ROS 2 and create ROS nodes and publishers
+    rclpy.init()
     event_publisher = EventPublisherNode()
+    clock_node = rclpy.create_node("isaac_adaptive_clock")
+    clock_pub = clock_node.create_publisher(Clock, "/clock", 10)
 
     # 4. Create the Render Product and attach the Annotator
     render_product = rep.create.render_product(camera_path, resolution=(640, 360))
     rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cuda")
     rgb_annotator.attach([render_product])
-   
+
+    # 5. Create the event simulator   
+    event_sim = WarpEventCameraSimulator(width=640, height=360, threshold=0.20)
+
     print("[INIT] Pipeline established. Entering synchronous execution loop.")
    
     frame_idx = 0
     sim_time = 0.0
-
-    # 1. Initialize ROS 2 in your python script
-    rclpy.init()
-
-    # 2. Create your own node specifically for broadcasting the clock
-    clock_node = rclpy.create_node("isaac_adaptive_clock")
-
-    # 3. Create the publisher on that node
-    clock_pub = clock_node.create_publisher(Clock, "/clock", 10)
 
     # Benchmark trackers
     if BENCHMARK_MODE:
@@ -82,28 +77,27 @@ def main():
         start_time = time.time()
         frames_this_second = 0
    
-    # 5. The Ghost Kitchen Loop (Dedicated thread, maximum execution speed)
+    # 6. 
     while simulation_app.is_running():
         try:
-            # A. You drive the engine. This executes your 0.01s physics tick and renders the scene.
+            # A. Drive the engine. This executes 0.01s physics tick and renders the scene.
             simulation_app.update()
             sim_time += 0.01
 
+            # B. Update the clock time and publish
             msg = Clock()
-
             sec = int(sim_time)                    
             nanosec = int((sim_time - sec) * 1e9)   
-
             msg.clock.sec = sec
             msg.clock.nanosec = nanosec
 
             clock_pub.publish(msg)
             rclpy.spin_once(clock_node, timeout_sec=0.0)
             
-            # A1. Move the camera (simple)
+            # C. Move the camera 
             update_camera_position(camera_path, frame_idx)
            
-            # B. Fire Replicator to harvest the data for THIS exact state.
+            # D. Fire Replicator to harvest the data for THIS exact state.
             # https://docs.omniverse.nvidia.com/kit/docs/omni_replicator/latest/source/extensions/omni.replicator.core/docs/API.html#omni.replicator.core.orchestrator.step
             # delta_time=0.0 ensures Replicator grabs the buffer without double-stepping the physics timeline.
             # wait_for_render=True ensures the Python execution thread blocks until the GPU is done
@@ -111,23 +105,19 @@ def main():
             # rt_subframes=-1 ensures it uses the modified carb settings
             rep.orchestrator.step(delta_time=0.0, wait_for_render=True, pause_timeline=True, rt_subframes=-1)
            
-            # C. Retrieve the dense array directly from the VRAM buffer
+            # E. Retrieve the dense array directly from the VRAM buffer
             # https://docs.omniverse.nvidia.com/kit/docs/omni_replicator/latest/source/extensions/omni.replicator.core/docs/API.html#omni.replicator.core.annotators.Annotator.get_data
             # device=cuda ensures a warp array is returned and remains in VRAM
             # do_array_copy ensures a copy of the frame is made in case the events_out_wp is not computed in time
             rgb_data = rgb_annotator.get_data(device="cuda", do_array_copy=False)
            
+            # F. Get the events
             dt_ns = int(0.01 * 1e9)
-            # D. Route to your custom NVIDIA Warp kernel
-            events_1d = event_sim.process_frame(rgb_data, )
+            events_1d = event_sim.process_frame(rgb_data, dt_ns)
+
+            # G. Broadcast events
             event_publisher.publish_events(events_1d, sec, nanosec, width=640, height=360)
-            # E. Live validation
-            # events_out_wp = event_sim.process_frame(rgb_data)
-            # keep_running = visualize_event_frame_live(events_out_wp)
-           
-            # if not keep_running:
-            #     print("\n[STOP] User interrupted via OpenCV window. Exiting loop.")
-            #     break
+
             # --- BENCHMARK LOGIC ---
             if BENCHMARK_MODE:
                 frames_this_second += 1
@@ -151,6 +141,7 @@ def main():
     # 6. Clean up windows before closing
     cv2.destroyAllWindows()
 
+    event_publisher.destroy_node()
     clock_node.destroy_node()
     rclpy.shutdown()
 
