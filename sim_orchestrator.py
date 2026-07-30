@@ -84,14 +84,9 @@ def setup_isaac_environment():
     
     # 3. Create a Placeholder Target Object (e.g., a high-contrast sphere)
     # In production, this can be swapped with a custom drone USD asset path.
+    drone_asset_path = assets_root_path + "/Isaac/Robots/Quadrotor/quadrotor.usd"  
     target_path = "/World/TargetDrone"
-    target_prim = create_prim(
-        prim_path=target_path,
-        prim_type="Sphere",
-        position=(0.0, 5.0, 1.5), # Spawned 10 meters in front of the camera
-    )
     # Scale down to proxy size of a small quadcopter (diameter = 30cm)
-    target_prim.GetAttribute("xformOp:scale").Set((0.15, 0.15, 0.15))
 
     
     print(f"[SHIM] Environment ready. Tracking camera initialized at: {camera_path}")
