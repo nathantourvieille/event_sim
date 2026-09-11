@@ -89,8 +89,8 @@ class DroneTrackingSceneCfg(InteractiveSceneCfg):
     dvs_cam = DVSCameraCfg(
         prim_path="{ENV_REGEX_NS}/Observer/body/dvs_cam", # Mount to the Crazyflie's main body
         update_period=0.0, 
-        height=480, 
-        width=640, 
+        height=260, 
+        width=346, 
         threshold=0.15,
         enable_warp=True, # Critical: enables motion-vector extraction for the 5070
         spawn=sim_utils.PinholeCameraCfg(clipping_range=(0.01, 1e5)),
@@ -101,8 +101,9 @@ class DroneTrackingSceneCfg(InteractiveSceneCfg):
 
 def main():
     # Setup rendering and warp timing
-    render_hz = 80 
-    K = 4  # Warp multiplier: generates events at 400Hz (50 * 8)
+    render_hz = 360 # must change saving rate if u do this
+
+    K = 8  # Warp multiplier: generates events at 400Hz (50 * 8)
     dt = 1.0 / render_hz
     dt_fine = 1.0 / (render_hz * K)
 
@@ -177,17 +178,17 @@ def main():
             target_pose = target.data.default_root_state[:, :7].clone()
 
             # --- FLIGHT SETTINGS ---
-            speed = 0.5      # Reduced to 3.0 so they fly smoothly instead of teleporting
+            speed = 6 + 6 * math.cos(t_prev)    # Reduced to 3.0 so they fly smoothly instead of teleporting
             radius = 4.0       # 4 meter wide circle
-            delay = 0.6 + math.cos(t_prev * speed) / 2.0     # Observer follows 0.4 seconds behind
+            delay = 0.5 + math.cos(t_prev * speed * 2) / 4.0     # Observer follows 0.4 seconds behind
 
             # Calculate positions
-            target_x = radius * math.cos(t_prev * speed)
-            target_y = radius * math.sin(t_prev * speed)
-            target_z = 2.0 + 0.25 * math.cos(t_prev * speed * 2) # Bob up and down
+            target_x = (radius + 0.2) * math.cos(t_prev * speed )
+            target_y = (radius + 0.2)* math.sin(t_prev * speed)
+            target_z = 2.0 + 0.15 * math.cos(t_prev * speed * 8) # Bob up and down
 
-            obs_x = radius * math.cos((t_prev - delay) * speed)
-            obs_y = radius * math.sin((t_prev - delay) * speed)
+            obs_x = radius * math.cos((t_prev) * speed - delay)
+            obs_y = radius * math.sin((t_prev) * speed - delay)
             obs_z = 2.0
 
             # Assign positions
@@ -196,11 +197,11 @@ def main():
 
             # --- CALCULATE ROTATIONS (YAW) ---
             target_yaw = (t_prev * speed) + (math.pi / 2.0)
-            obs_yaw = ((t_prev - delay) * speed) + (math.pi / 2.0)
+            obs_yaw = ((t_prev ) * speed - delay) + (math.pi / 2.0)
 
             # Apply Quaternions [qw, qx, qy, qz]
             target_pose[:, 3] = math.cos(target_yaw / 2.0)  
-            target_pose[:, 4], target_pose[:, 5] = 0.0, 0.0 # Forces upright!
+            target_pose[:, 4], target_pose[:, 5] = 0.0, 0.0 
             target_pose[:, 6] = math.sin(target_yaw / 2.0)  
 
             obs_pose[:, 3] = math.cos(obs_yaw / 2.0)
@@ -213,9 +214,9 @@ def main():
 
             # --- THE MISSING KILL SWITCH ---
             # You MUST zero the velocities here so the physics engine doesn't flip the drones!
-            zero_velocities = torch.zeros((1, 6), device=target.device)
-            target.write_root_velocity_to_sim(zero_velocities)
-            observer.write_root_velocity_to_sim(zero_velocities)
+            # zero_velocities = torch.zeros((1, 6), device=target.device)
+            # target.write_root_velocity_to_sim(zero_velocities)
+            # observer.write_root_velocity_to_sim(zero_velocities)
 
 
             # --- 2. STEP PHYSICS & RENDER (50Hz) ---
@@ -230,7 +231,7 @@ def main():
             # --- 3. DYNAMIC SEMANTIC ID LOOKUP ---
           
                 
-            if frame_count % 6 == 0:
+            if frame_count % 1 == 0:
                 # --- 4. EXTRACT GROUND TRUTH SEGMENTATION ---
                 seg_tensor = cam_data.output["semantic_segmentation"][0]
                 
@@ -241,8 +242,8 @@ def main():
                 vis_mask = binary_mask * 255 
                 cv2.imshow("Ground Truth Mask", vis_mask)
                 # Save the mask frame
-                timestamp_us = int(t_prev * 1e6)
-                np.save(f"{gt_dir}/mask_{timestamp_us}.npy", binary_mask)
+                # timestamp_us = int(t_prev * 1e6)
+                # np.save(f"{gt_dir}/mask_{timestamp_us}.npy", binary_mask)
 
             # --- 5. SYNTHESIZE HIGH-FREQUENCY EVENTS (400Hz) ---
             cur_snap = dvs.snapshot()
@@ -255,6 +256,10 @@ def main():
             cv2.waitKey(10)
             # time.sleep(0.01)  
 
+            # if frame_count > 1000:
+            #     print("Reached 1000 frames! Breaking loop...")
+            #     break
+
         except Exception as e:
             # If ANY Python error happens, catch it and print it immediately!
             import traceback
@@ -265,6 +270,14 @@ def main():
             print("="*50 + "\n")
             break # Break the loop so it can shut down cleanly
 
+    print("Flushing DVS events to disk...")
+    try:
+        dvs.flush(0, episode_idx=0)
+        print("Flush command executed.")
+        time.sleep(2) # Give the hard drive 2 seconds to write the massive file
+    except Exception as e:
+        print(f"FAILED TO FLUSH: {e}")    
+    simulation_app.close()
 if __name__ == "__main__":
     main()
-    simulation_app.close()
+    
