@@ -14,7 +14,7 @@ AppLauncher.add_app_launcher_args(parser)
 
 args_cli = parser.parse_args() 
 args_cli.enable_cameras = True 
-## 3. THE FIX: Inject the extension commands into kit_args as a STRING
+# Inject the extension commands into kit_args as a STRING
 plugin_ext_folder = "/home/vboxuser/event_sim/isaac-sim-event-camera-plugin/extension"
 custom_kit_args = f"--ext-folder {plugin_ext_folder} --enable dvs_preview"
 
@@ -25,7 +25,7 @@ else:
     # If it's already a string, just add our commands to the end of it with a space
     args_cli.kit_args += f" {custom_kit_args}"
 
-# 4. Launch the app!
+# 4. Launch the app
 app_launcher = AppLauncher(args_cli) 
 simulation_app = app_launcher.app
 
@@ -38,7 +38,6 @@ from isaaclab.utils import configclass
 # from isaaclab_assets.robots.crazyflie import CRAZYFLIE_CFG
 from isaaclab_assets import CRAZYFLIE_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
-# 2. Import the spikelab-jhu plugin components
 from dvs_gen.sensors import DVSCameraCfg, DVSCamera, tag_dvs_cameras
 
 from isaacsim.storage.native import get_assets_root_path
@@ -48,9 +47,7 @@ assets_root_path = get_assets_root_path()
 @configclass
 class DroneTrackingSceneCfg(InteractiveSceneCfg):
     """Configures the simulation scene with two drones and an event camera."""
-
-    env_spacing = 5.0  # Spacing distance between environments (meters)
-# 0. Load the Room Environment correctly
+    env_spacing = 5.0
     warehouse = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/warehouse",
         spawn=sim_utils.UsdFileCfg(
@@ -59,7 +56,6 @@ class DroneTrackingSceneCfg(InteractiveSceneCfg):
         )
     )
 
-    # 1. Create a Default Light Source correctly
     distant_light = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/DistantLight",
         spawn=sim_utils.DistantLightCfg(
@@ -68,8 +64,7 @@ class DroneTrackingSceneCfg(InteractiveSceneCfg):
         )
     )
 
-
-# 1. OBSERVER DRONE
+    # 1. OBSERVER DRONE
     observer_cfg = CRAZYFLIE_CFG.copy()
     observer_cfg.prim_path = "{ENV_REGEX_NS}/Observer"
     observer_cfg.spawn.rigid_props = sim_utils.RigidBodyPropertiesCfg(disable_gravity=True)
@@ -77,11 +72,12 @@ class DroneTrackingSceneCfg(InteractiveSceneCfg):
     observer_cfg.init_state.pos = (0.0, 0.0, 2.0)
     observer = observer_cfg
 
-    # 2. TARGET DRONE
+    # 2. TARGET DRONE extra big for model
     target_cfg = CRAZYFLIE_CFG.copy()
     target_cfg.prim_path = "{ENV_REGEX_NS}/Target"
     target_cfg.spawn.rigid_props = sim_utils.RigidBodyPropertiesCfg(disable_gravity=True)
     target_cfg.spawn.semantic_tags = [("class", "enemy")]
+    target_cfg.spawn.scale = (3.0, 3.0, 3.0)  # Doubles the size in X, Y, and Z axes
     target_cfg.init_state.pos = (3.0, 0.0, 2.0)
     target = target_cfg
 
@@ -100,46 +96,38 @@ class DroneTrackingSceneCfg(InteractiveSceneCfg):
 
 
 def main():
-    # Setup rendering and warp timing
-    render_hz = 360 # must change saving rate if u do this
 
-    K = 8  # Warp multiplier: generates events at 400Hz (50 * 8)
+    # Setup rendering and warp timing
+    render_hz = 40 # has to be a multiple of 40hz to be able to save GT at 40 hz
+    K = 10  # Warp multiplier: generates events at 400Hz (50 * 8)
     dt = 1.0 / render_hz
     dt_fine = 1.0 / (render_hz * K)
 
     # Create the simulation context (controls time and physics)
-    sim_cfg = sim_utils.SimulationCfg(
-    dt=dt,  
-    render_interval=1 
-    )
+    sim_cfg = sim_utils.SimulationCfg(dt=dt,  render_interval=1)
     sim = sim_utils.SimulationContext(sim_cfg)
 
-        # Instantiate the scene
+    # Instantiate the scene
     scene_cfg = DroneTrackingSceneCfg(num_envs=1)
     scene = InteractiveScene(scene_cfg)
     sim.reset()
     scene.reset()
     tag_dvs_cameras(scene, ["dvs_cam"]) # tag the cam for visualization
     # 3. Wrap the camera to extract data to disk
-    dvs = DVSCamera.from_scene(scene, ["dvs_cam"], out_dir="/tmp/drone_tracking_dvs")
-    
-
+    dvs = DVSCamera.from_scene(scene, ["dvs_cam"], out_dir="/media/vboxuser/T9/sim_data/events")
     
     prev_snap = dvs.snapshot()
     t_prev = 0.0
 
-    # Create a folder for the 50Hz ground truth masks
-    gt_dir = "/tmp/drone_tracking_dvs/ground_truth"
+    # Create a folder for the 40Hz ground truth masks
+    gt_dir = "/media/vboxuser/T9/sim_data/ground_truth"
     os.makedirs(gt_dir, exist_ok=True)
 
-    # --- ONE-TIME SEMANTIC ID LOOKUP ---
-    # Fetch mapping once to avoid searching dict inside the main loop
-# --- ONE-TIME SEMANTIC ID LOOKUP ---
-    # Before the while loop starts
+    # Find mapping of enemy drone
+
     enemy_id = None
     print("Starting simulation loop...")
     frame_count = 0
-
 
     while enemy_id is None and simulation_app.is_running():
 
@@ -156,10 +144,7 @@ def main():
                 if "idToLabels" in seg_info:
                     for obj_id_str, class_info in seg_info["idToLabels"].items():
                         if "enemy" in str(class_info):
-                     
                             enemy_id = ast.literal_eval(obj_id_str) # Converts string to tuple
-                    
-                                
                             print(f"[INFO] Found 'enemy' tag at frame {frame_count} with Identifier: {enemy_id}")
                             break
    
@@ -168,24 +153,22 @@ def main():
         try:
             observer = scene["observer"]
             target = scene["target"]
-            
- # --- 1. APPLY KINEMATIC TRAJECTORIES ---
-            
-          # --- 1. APPLY KINEMATIC TRAJECTORIES ---
+                        
+            # --- 1. APPLY KINEMATIC TRAJECTORIES ---
             
             # Start from pristine default states
             obs_pose = observer.data.default_root_state[:, :7].clone()
             target_pose = target.data.default_root_state[:, :7].clone()
 
             # --- FLIGHT SETTINGS ---
-            speed = 6 + 6 * math.cos(t_prev)    # Reduced to 3.0 so they fly smoothly instead of teleporting
+            speed = 0.1 + 0.2 * math.cos(t_prev)    # Reduced to 3.0 so they fly smoothly instead of teleporting
             radius = 4.0       # 4 meter wide circle
             delay = 0.5 + math.cos(t_prev * speed * 2) / 4.0     # Observer follows 0.4 seconds behind
 
             # Calculate positions
             target_x = (radius + 0.2) * math.cos(t_prev * speed )
             target_y = (radius + 0.2)* math.sin(t_prev * speed)
-            target_z = 2.0 + 0.15 * math.cos(t_prev * speed * 8) # Bob up and down
+            target_z = 2.0 + 0.15 * math.cos(t_prev * speed * 2) # Bob up and down
 
             obs_x = radius * math.cos((t_prev) * speed - delay)
             obs_y = radius * math.sin((t_prev) * speed - delay)
@@ -230,7 +213,7 @@ def main():
 
             # --- 3. DYNAMIC SEMANTIC ID LOOKUP ---
           
-                
+            # Change to whatever dt/40   
             if frame_count % 1 == 0:
                 # --- 4. EXTRACT GROUND TRUTH SEGMENTATION ---
                 seg_tensor = cam_data.output["semantic_segmentation"][0]
@@ -242,8 +225,8 @@ def main():
                 vis_mask = binary_mask * 255 
                 cv2.imshow("Ground Truth Mask", vis_mask)
                 # Save the mask frame
-                # timestamp_us = int(t_prev * 1e6)
-                # np.save(f"{gt_dir}/mask_{timestamp_us}.npy", binary_mask)
+                timestamp = int(t_prev)
+                np.save(f"{gt_dir}/mask_{timestamp}.npy", binary_mask)
 
             # --- 5. SYNTHESIZE HIGH-FREQUENCY EVENTS (400Hz) ---
             cur_snap = dvs.snapshot()
@@ -254,11 +237,10 @@ def main():
             t_prev += dt
             frame_count += 1
             cv2.waitKey(10)
-            # time.sleep(0.01)  
 
-            # if frame_count > 1000:
-            #     print("Reached 1000 frames! Breaking loop...")
-            #     break
+            if frame_count > 2000:
+                print("Reached 2000 frames! Breaking loop...")
+                break
 
         except Exception as e:
             # If ANY Python error happens, catch it and print it immediately!

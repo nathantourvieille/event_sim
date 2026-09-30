@@ -39,7 +39,7 @@ def convert_isaac_to_evimo_v1(input_dir, output_dir, seq_name='sequence_00'):
     print(f"  -> Formatted {len(events_arr)} events. Shape: {events_arr.shape}")
 
  # 2. Prepare Masks and Metadata
-    mask_files = glob.glob(os.path.join(input_dir, 'ground_truth', 'mask_*.npy'))
+    mask_files = sorted(glob.glob("mask_*.npy"), key=lambda p: int(os.path.basename(p).split("_")[1].split(".")[0]))
     if not mask_files:
         print("Warning: No ground truth masks found in input directory.")
         return
