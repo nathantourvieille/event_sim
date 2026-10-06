@@ -95,8 +95,8 @@ class DroneTrackingSceneCfg(InteractiveSceneCfg):
     )
 
 
-def main():
 
+def main():
     # Setup rendering and warp timing
     render_hz = 40 # has to be a multiple of 40hz to be able to save GT at 40 hz
     K = 10  # Warp multiplier: generates events at 400Hz (50 * 8)
@@ -116,8 +116,59 @@ def main():
     # 3. Wrap the camera to extract data to disk
     dvs = DVSCamera.from_scene(scene, ["dvs_cam"], out_dir="/media/vboxuser/T9/sim_data/events")
     
-    prev_snap = dvs.snapshot()
-    t_prev = 0.0
+    def set_poses(t):
+        observer = scene["observer"]
+        target = scene["target"]
+                    
+        # --- 1. APPLY KINEMATIC TRAJECTORIES ---
+        
+        # Start from pristine default states
+        obs_pose = observer.data.default_root_state[:, :7].clone()
+        target_pose = target.data.default_root_state[:, :7].clone()
+
+        # --- FLIGHT SETTINGS ---
+        speed = 0.1 + 0.2 * math.cos(t)    # Reduced to 3.0 so they fly smoothly instead of teleporting
+        radius = 4.0       # 4 meter wide circle
+        delay = 0.5 + math.cos(t * speed * 2) / 4.0     # Observer follows 0.4 seconds behind
+
+        # Calculate positions
+        target_x = (radius + 0.2) * math.cos(t * speed )
+        target_y = (radius + 0.2)* math.sin(t * speed)
+        target_z = 2.0 + 0.15 * math.cos(t * speed * 2) # Bob up and down
+
+        obs_x = radius * math.cos((t) * speed - delay)
+        obs_y = radius * math.sin((t) * speed - delay)
+        obs_z = 2.0
+
+        # Assign positions
+        target_pose[:, 0], target_pose[:, 1], target_pose[:, 2] = target_x, target_y, target_z
+        obs_pose[:, 0], obs_pose[:, 1], obs_pose[:, 2] = obs_x, obs_y, obs_z
+
+        # --- CALCULATE ROTATIONS (YAW) ---
+        target_yaw = (t * speed) + (math.pi / 2.0)
+        obs_yaw = ((t ) * speed - delay) + (math.pi / 2.0)
+
+        # Apply Quaternions [qw, qx, qy, qz]
+        target_pose[:, 3] = math.cos(target_yaw / 2.0)  
+        target_pose[:, 4], target_pose[:, 5] = 0.0, 0.0 
+        target_pose[:, 6] = math.sin(target_yaw / 2.0)  
+
+        obs_pose[:, 3] = math.cos(obs_yaw / 2.0)
+        obs_pose[:, 4], obs_pose[:, 5] = 0.0, 0.0
+        obs_pose[:, 6] = math.sin(obs_yaw / 2.0)
+
+        # Write poses to simulator
+        target.write_root_pose_to_sim(target_pose)
+        observer.write_root_pose_to_sim(obs_pose)
+
+        # --- THE MISSING KILL SWITCH ---
+        # You MUST zero the velocities here so the physics engine doesn't flip the drones!
+        # zero_velocities = torch.zeros((1, 6), device=target.device)
+        # target.write_root_velocity_to_sim(zero_velocities)
+        # observer.write_root_velocity_to_sim(zero_velocities)
+    
+    # prev_snap = dvs.snapshot()
+    # t_prev = 0.0
 
     # Create a folder for the 40Hz ground truth masks
     gt_dir = "/media/vboxuser/T9/sim_data/ground_truth"
@@ -127,14 +178,18 @@ def main():
 
     enemy_id = None
     print("Starting simulation loop...")
-    frame_count = 0
-
+    # t_prev = 0.0
+    t_prev = -dt
+    # In case the enemy drone does not start in a visible way, we will step the simulation until we find it so we can extract its ID
     while enemy_id is None and simulation_app.is_running():
 
         # 1. Step the simulation so the renderer actually draws the frame
-        sim.step()
-        simulation_app.update()
-        scene.update(dt=dt)
+        set_poses(t_prev) # Moves the drones by updating the buffers
+        scene.write_data_to_sim() # Pushes buffers to PHYSX engine
+        sim.step() # Advances sim by dt time. Runs the physics and then renders the frame
+        scene.update(dt=dt) # Pulls the data from the sim and into the buffers where it can be accessed
+        prev_snap = dvs.snapshot()
+        t_prev += dt
 
         cam_data = scene["dvs_cam"].data
         if cam_data.info is not None and len(cam_data.info) > 0:
@@ -145,67 +200,18 @@ def main():
                     for obj_id_str, class_info in seg_info["idToLabels"].items():
                         if "enemy" in str(class_info):
                             enemy_id = ast.literal_eval(obj_id_str) # Converts string to tuple
-                            print(f"[INFO] Found 'enemy' tag at frame {frame_count} with Identifier: {enemy_id}")
+                            print(f"[INFO] Found 'enemy' tag with Identifier: {enemy_id}")
                             break
-   
 
+    frame_count = 0
     while simulation_app.is_running():
         try:
-            observer = scene["observer"]
-            target = scene["target"]
-                        
-            # --- 1. APPLY KINEMATIC TRAJECTORIES ---
-            
-            # Start from pristine default states
-            obs_pose = observer.data.default_root_state[:, :7].clone()
-            target_pose = target.data.default_root_state[:, :7].clone()
-
-            # --- FLIGHT SETTINGS ---
-            speed = 0.1 + 0.2 * math.cos(t_prev)    # Reduced to 3.0 so they fly smoothly instead of teleporting
-            radius = 4.0       # 4 meter wide circle
-            delay = 0.5 + math.cos(t_prev * speed * 2) / 4.0     # Observer follows 0.4 seconds behind
-
-            # Calculate positions
-            target_x = (radius + 0.2) * math.cos(t_prev * speed )
-            target_y = (radius + 0.2)* math.sin(t_prev * speed)
-            target_z = 2.0 + 0.15 * math.cos(t_prev * speed * 2) # Bob up and down
-
-            obs_x = radius * math.cos((t_prev) * speed - delay)
-            obs_y = radius * math.sin((t_prev) * speed - delay)
-            obs_z = 2.0
-
-            # Assign positions
-            target_pose[:, 0], target_pose[:, 1], target_pose[:, 2] = target_x, target_y, target_z
-            obs_pose[:, 0], obs_pose[:, 1], obs_pose[:, 2] = obs_x, obs_y, obs_z
-
-            # --- CALCULATE ROTATIONS (YAW) ---
-            target_yaw = (t_prev * speed) + (math.pi / 2.0)
-            obs_yaw = ((t_prev ) * speed - delay) + (math.pi / 2.0)
-
-            # Apply Quaternions [qw, qx, qy, qz]
-            target_pose[:, 3] = math.cos(target_yaw / 2.0)  
-            target_pose[:, 4], target_pose[:, 5] = 0.0, 0.0 
-            target_pose[:, 6] = math.sin(target_yaw / 2.0)  
-
-            obs_pose[:, 3] = math.cos(obs_yaw / 2.0)
-            obs_pose[:, 4], obs_pose[:, 5] = 0.0, 0.0
-            obs_pose[:, 6] = math.sin(obs_yaw / 2.0)
-
-            # Write poses to simulator
-            target.write_root_pose_to_sim(target_pose)
-            observer.write_root_pose_to_sim(obs_pose)
-
-            # --- THE MISSING KILL SWITCH ---
-            # You MUST zero the velocities here so the physics engine doesn't flip the drones!
-            # zero_velocities = torch.zeros((1, 6), device=target.device)
-            # target.write_root_velocity_to_sim(zero_velocities)
-            # observer.write_root_velocity_to_sim(zero_velocities)
-
-
+        
+            set_poses(t_prev)
             # --- 2. STEP PHYSICS & RENDER (50Hz) ---
             scene.write_data_to_sim()
             sim.step()
-            simulation_app.update()
+            # simulation_app.update()
             scene.update(dt=dt)
             
             cam_data = scene["dvs_cam"].data
@@ -225,11 +231,17 @@ def main():
                 vis_mask = binary_mask * 255 
                 cv2.imshow("Ground Truth Mask", vis_mask)
                 # Save the mask frame
-                timestamp = int(t_prev)
-                np.save(f"{gt_dir}/mask_{timestamp}.npy", binary_mask)
+                step_no = int(round((t_prev + dt) / dt))
+                np.save(f"{gt_dir}/mask_{step_no}.npy", binary_mask)
 
             # --- 5. SYNTHESIZE HIGH-FREQUENCY EVENTS (400Hz) ---
             cur_snap = dvs.snapshot()
+            rgb_c, mv_c, _ = cur_snap["dvs_cam"]
+            rgb_p = prev_snap["dvs_cam"][0]
+            if frame_count % 25 == 0:
+                print(f"[diag] f={frame_count} mv_max={mv_c.abs().max().item():.3f}px "
+                    f"mv_nonzero={(mv_c.abs().sum(-1) > 0).float().mean().item():.4f} "
+                    f"rgb_change={(rgb_c - rgb_p).abs().mean().item():.6f}")
             dvs.warp_and_process(prev_snap, cur_snap, K, t_prev, dt_fine)
             
             # Advance time
@@ -238,8 +250,8 @@ def main():
             frame_count += 1
             cv2.waitKey(10)
 
-            if frame_count > 2000:
-                print("Reached 2000 frames! Breaking loop...")
+            if frame_count >= 500:
+                print("Reached 500 frames! Breaking loop...")
                 break
 
         except Exception as e:

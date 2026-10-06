@@ -1,193 +1,119 @@
-import h5py
-import numpy as np
-import os
+#!/usr/bin/env python3
+"""
+Convert Isaac Sim DVS output into the minimal EVIMO-style .h5 that EVIMOSequence reads.
+
+Inputs
+  input_dir/env0_ep0.h5             -> DVS/dvs_cam/{x,y,p,t}   (t already in seconds)
+  input_dir/ground_truth/mask_<n>.npy
+        n = sim step number (1, 2, 3, ...). Only the ORDER matters for sorting;
+        the frame time in seconds is computed as n * sim_dt.
+
+Output keys (14, all datasets, flat file)
+  REAL (the loader reads their contents):
+    events    (N,4) float32  [x, y, t, p]  p in {0,1}, t in seconds, sorted
+    events_t  (N,)  float32
+    ts        (F,)  float64  frame times in seconds
+    mask      (F,H,W) float64  values {0, 2000}
+    height, width   int64 scalars
+  PLACEHOLDERS (the loader opens them by name but never reads them):
+    index, depth    empty arrays
+    meta            the text "{}"
+    discretization, fx, fy, cx, cy   scalar 0.0
+"""
 import argparse
 import glob
-import json
+import os
 
-def convert_isaac_to_evimo_v1(input_dir, output_dir, seq_name='sequence_00'):
-    """
-    Converts spikelab-jhu HDF5 events and NumPy masks into the strictly 
-    compressed EVIMO v1 / EVIMO2v1 NPZ format.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    in_h5_path = os.path.join(input_dir, 'env0_ep0.h5')
-    if not os.path.exists(in_h5_path):
-        print(f"Error: {in_h5_path} not found.")
-        return
+import h5py
+import numpy as np
 
-    # 1. Prepare Events Array
-    print(f"Loading events from {in_h5_path}")
-    with h5py.File(in_h5_path, 'r') as f_in:
-        # Load as float64 to preserve timestamp precision when we merge into a single array
-        x = np.array(f_in['DVS/dvs_cam/x'], dtype=np.float64)
-        y = np.array(f_in['DVS/dvs_cam/y'], dtype=np.float64)
-        p = np.array(f_in['DVS/dvs_cam/p'], dtype=np.float64)
-        t = np.array(f_in['DVS/dvs_cam/t'], dtype=np.float64) 
+MASK_VALUE = 2000.0
 
-    if t.max() > 10000:
-        if t.max() > 1e11:
-            print("Detected nanoseconds. Converting to seconds...")
-            t = t / 1e9
-        else:
-            print("Detected microseconds. Converting to seconds...")
-            t = t / 1e6
-        
-    # EVIMO v1 requires an (N, 4) shape array where columns are strictly: [timestamp, x, y, polarity]
-    events_arr = np.column_stack((t, x, y, p))
-    print(f"  -> Formatted {len(events_arr)} events. Shape: {events_arr.shape}")
 
- # 2. Prepare Masks and Metadata
-    mask_files = sorted(glob.glob("mask_*.npy"), key=lambda p: int(os.path.basename(p).split("_")[1].split(".")[0]))
+def convert(args):
+    os.makedirs(args.output_dir, exist_ok=True)
+    H, W = args.height, args.width
+
+    # ---------------------------------------------------------------- events
+    in_h5 = os.path.join(args.input_dir, args.event_file)
+    if not os.path.exists(in_h5):
+        raise FileNotFoundError(in_h5)
+    print(f"Loading events from {in_h5}")
+    with h5py.File(in_h5, "r") as f:
+        g = f[args.dvs_group]
+        x = np.asarray(g["x"], dtype=np.float32)
+        y = np.asarray(g["y"], dtype=np.float32)
+        p = np.asarray(g["p"])
+        t = np.asarray(g["t"], dtype=np.float64)  # seconds
+    if not np.all(np.diff(t) >= 0):
+        print("Events not sorted -> sorting")
+        order = np.argsort(t, kind="stable")
+        t, x, y, p = t[order], x[order], y[order], p[order]
+    p = (p > 0).astype(np.float32)  # EVIMO polarity {0,1}
+    print(f"  {t.size} events, t: {t[0]:.4f} -> {t[-1]:.4f} s")
+
+    # ----------------------------------------------------------------- masks
+    mask_dir = args.mask_dir or os.path.join(args.input_dir, "ground_truth")
+    mask_files = glob.glob(os.path.join(mask_dir, "mask_*.npy"))
     if not mask_files:
-        print("Warning: No ground truth masks found in input directory.")
-        return
+        raise FileNotFoundError(f"No mask_*.npy in {mask_dir}")
+    step_no = lambda fp: int(os.path.basename(fp)[5:-4])  # "mask_12.npy" -> 12
+    mask_files.sort(key=step_no)  # numeric order, so mask_10 comes after mask_9
+    ts = np.array([step_no(fp) for fp in mask_files], dtype=np.float64) * args.sim_dt
+    F, N = len(mask_files), t.size
+    print(f"  {F} masks, ts: {ts[0]:.4f} -> {ts[-1]:.4f} s (step number x {args.sim_dt:g} s)")
+    if ts[-1] > t[-1] + 1e-9:
+        print("WARNING: last mask is later than the last event - check --sim_dt.")
 
-    # --- NEW FIX: Sort numerically by timestamp, not alphabetically ---
-    def get_timestamp_from_filename(filepath):
-        base = os.path.basename(filepath)
-        ts_str = base.replace('mask_', '').replace('.npy', '')
-        return float(ts_str)
+    # ----------------------------------------------------------------- write
+    out_h5 = os.path.join(args.output_dir, f"{args.seq_name}.h5")
+    print(f"Writing {out_h5}")
+    n_nonempty = 0
+    with h5py.File(out_h5, "w") as fo:
+        # REAL: events + events_t, written in slices so RAM never doubles
+        ev = fo.create_dataset("events", shape=(N, 4), dtype=np.float32,
+                               chunks=(min(N, 1 << 20), 4), compression="gzip", compression_opts=4)
+        et = fo.create_dataset("events_t", shape=(N,), dtype=np.float32,
+                               chunks=(min(N, 1 << 20),), compression="gzip", compression_opts=4)
+        step = 5_000_000
+        for s in range(0, N, step):
+            e = min(s + step, N)
+            ev[s:e] = np.column_stack((x[s:e], y[s:e], t[s:e], p[s:e])).astype(np.float32)
+            et[s:e] = t[s:e].astype(np.float32)
 
-    mask_files.sort(key=get_timestamp_from_filename)
-    # ----------------------------------------------------------------
+        # REAL: frame times, masks (one frame at a time), image size
+        fo.create_dataset("ts", data=ts)
+        mk = fo.create_dataset("mask", shape=(F, H, W), dtype=np.float64,
+                               chunks=(1, H, W), compression="gzip", compression_opts=4)
+        for i, fp in enumerate(mask_files):
+            m = np.load(fp)
+            if m.shape != (H, W):
+                raise ValueError(f"{fp} has shape {m.shape}, expected {(H, W)}")
+            m = (m > 0).astype(np.float64) * MASK_VALUE
+            n_nonempty += int(m.any())
+            mk[i] = m
+        fo.create_dataset("height", data=np.int64(H))
+        fo.create_dataset("width", data=np.int64(W))
 
-    print(f"Found {len(mask_files)} ground truth masks. Bundling into sequence...")
-    
-    masks = []
-    frames_meta = []
-    
-    for i, mf in enumerate(mask_files):
-        ts_val = get_timestamp_from_filename(mf)
-        
-        # --- NEW FIX: Correct microsecond conversion threshold ---
-        # If the value is larger than 1000, it's definitely in microseconds
-        if ts_val > 1000:  
-            ts_val /= 1e6 
-        
-        mask_data = np.load(mf).astype(np.uint16)
-        mask_data = (mask_data > 0).astype(np.uint8) 
-        
-        masks.append(mask_data)
-        
-        frames_meta.append({
-            'id': i,
-            'timestamp': ts_val,
-        })
-        
-    masks_arr = np.stack(masks, axis=0)
-    print(f"  -> Formatted masks. Shape: {masks_arr.shape}")
-    
-    # Construct the meta dictionary
-    meta_dict = {
-        'frames': frames_meta
-    }
+        # PLACEHOLDERS: must exist (the loader opens them by name) but are never read
+        fo.create_dataset("index", shape=(0,), dtype=np.uint32)
+        fo.create_dataset("depth", shape=(0,), dtype=np.float64)
+        fo.create_dataset("meta", data=np.bytes_("{}"))
+        for k in ("discretization", "fx", "fy", "cx", "cy"):
+            fo.create_dataset(k, data=np.float64(0.0))
 
-# 3. Reformat arrays exactly as ev-loader expects for .h5
-    t = events_arr[:, 0]
-    x = events_arr[:, 1]
-    y = events_arr[:, 2]
-    p = events_arr[:, 3]
-    
-    events_arr_h5 = np.column_stack((x, y, t, p))
-    events_t = t
-    
-    mask_timestamps_full = np.array([f['timestamp'] for f in frames_meta], dtype=np.float64)
-    
-    # --- NEW FIX: Filter out early frames with no events ---
-    valid_indices = []
-    for i, ts in enumerate(mask_timestamps_full):
-        # Ensure there are at least 100 events BEFORE this frame's timestamp
-        events_before = np.searchsorted(t, ts)
-        if events_before > 100:  
-            valid_indices.append(i)
-            
-    print(f"Dropping {len(mask_timestamps_full) - len(valid_indices)} early frames with zero event history.")
-    
-    # Apply the filter to arrays
-    masks_arr = masks_arr[valid_indices]
-    mask_timestamps = mask_timestamps_full[valid_indices]
-    
-    # Update frames_meta and fix their internal IDs
-    valid_frames_meta = [frames_meta[i] for i in valid_indices]
-    for new_id, frame in enumerate(valid_frames_meta):
-        frame['id'] = new_id
-    # -------------------------------------------------------
-    
-    print("Calculating event-to-frame index mapping...")
-    index_arr = np.searchsorted(t, mask_timestamps).astype(np.int64)
-    
-    # 4. Setup Camera Parameters
-    height = 260
-    width = 346
-    fx = 320.0
-    fy = 320.0
-    cx = 320.0
-    cy = 240.0
-    
-    meta_for_string = {
-        'meta': {
-            'res_x': height, 'res_y': width,
-            'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy
-        },
-        'frames': valid_frames_meta
-    }
+    print(f"Done. {N} events, {F} frames, non-empty masks: {n_nonempty}/{F}")
 
-    # --- ADD THIS DEBUG BLOCK ---
-    print("\n--- TIMESTAMP DEBUG INFO ---")
-    print(f"Events total: {len(t)}")
-    print(f"Event Time Range: {t[0]:.6f} to {t[-1]:.6f}")
-    print(f"Mask Time Range:  {mask_timestamps[0]:.6f} to {mask_timestamps[-1]:.6f}")
-    print(f"First 5 Mask Times: {mask_timestamps[:5]}")
-    print(f"Are Events perfectly sorted? : {np.all(np.diff(t) >= 0)}")
-    print("----------------------------\n")
-    # ----------------------------
 
-# 5. Save to HDF5
-    out_h5_path = os.path.join(output_dir, f'{seq_name}.h5')
-    print(f"Saving EVIMO formatted dataset to {out_h5_path}")
-    
-    with h5py.File(out_h5_path, 'w') as f_out:
-        # Event data
-        f_out.create_dataset("events", data=events_arr_h5, compression='gzip')
-        f_out.create_dataset("events_t", data=events_t)
-        
-        # Mask and timing data
-        f_out.create_dataset("mask", data=masks_arr, compression='gzip')
-        f_out.create_dataset("index", data=index_arr)
-        f_out.create_dataset("ts", data=mask_timestamps)
-        
-        # --- DUMMY DATA FOR STRICT DATALOADER ---
-        print("Generating dummy depth, classical, and discretization frames...")
-        dummy_depth = np.zeros_like(masks_arr, dtype=np.float32)
-        dummy_classical = np.zeros((*masks_arr.shape, 3), dtype=np.uint8)
-        dummy_discretization = np.zeros((1,), dtype=np.float32) # Tiny dummy array
-        
-        f_out.create_dataset("depth", data=dummy_depth, compression='gzip')
-        f_out.create_dataset("classical", data=dummy_classical, compression='gzip')
-        f_out.create_dataset("discretization", data=dummy_discretization)
-        # ----------------------------------------
-        
-        # Camera intrinsic parameters
-        f_out.create_dataset("height", data=height)
-        f_out.create_dataset("width", data=width)
-        f_out.create_dataset("fx", data=fx)
-        f_out.create_dataset("fy", data=fy)
-        f_out.create_dataset("cx", data=cx)
-        f_out.create_dataset("cy", data=cy)
-        
-        # Meta dictionary as a string representation
-        f_out.create_dataset("meta", data=np.string_(str(meta_for_string)))
-    
-    print(f"  -> Saved archive to {out_h5_path}")
-    print("Conversion complete.")
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Convert Isaac Sim DVS to EVIMO v1 .npz Format')
-    parser.add_argument('--input_dir', type=str, default='/tmp/drone_tracking_dvs', help='Dir with events.h5 and ground_truth/')
-    parser.add_argument('--output_dir', type=str, default='/home/vboxuser/algo_data/test/sequence_00', help='Output directory')
-    parser.add_argument('--seq_name', type=str, default='sequence_00', help='Name of the output sequence')
-    args = parser.parse_args()
-    
-    convert_isaac_to_evimo_v1(args.input_dir, args.output_dir, args.seq_name)
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Convert Isaac Sim DVS output to a minimal EVIMO-style .h5")
+    ap.add_argument("--input_dir", default="/media/vboxuser/T9/sim_data")
+    ap.add_argument("--output_dir", default="/media/vboxuser/T9/sim_data/test/sequence_00")
+    ap.add_argument("--seq_name", default="sequence_00")
+    ap.add_argument("--event_file", default="env0_ep0.h5")
+    ap.add_argument("--dvs_group", default="DVS/dvs_cam")
+    ap.add_argument("--mask_dir", default=None, help="folder with mask_<n>.npy (default: input_dir/ground_truth)")
+    ap.add_argument("--sim_dt", type=float, default=1.0 / 40, help="seconds per sim step (1/render_hz)")
+    ap.add_argument("--height", type=int, default=260)
+    ap.add_argument("--width", type=int, default=346)
+    convert(ap.parse_args())
