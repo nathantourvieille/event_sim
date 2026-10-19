@@ -6,6 +6,9 @@ import math
 import ast
 import time
 import cv2
+import matplotlib.pyplot as plt
+from scipy.ndimage import distance_transform_edt
+
 from isaaclab.app import AppLauncher
 
 # Inject IsaacSim default arguments to parser
@@ -115,6 +118,72 @@ def main():
     tag_dvs_cameras(scene, ["dvs_cam"]) # tag the cam for visualization
     # 3. Wrap the camera to extract data to disk
     dvs = DVSCamera.from_scene(scene, ["dvs_cam"], out_dir="/media/vboxuser/T9/sim_data/events")
+
+    def _splat_batch(img, dx, dy, imp, hw=1.0, beta=12.0):
+        """Batched softmax-splat: ``img`` (M,C,H,W); ``dx``,``dy``,``imp`` (M,H,W).
+        All M independent splats run in ONE index_add (the batch index is folded into
+        the scatter target). Returns out (M,C,H,W), holes (M,H,W)."""
+        import math
+        M, C, H, W = img.shape
+        dev = img.device
+        ys, xs = torch.meshgrid(torch.arange(H, device=dev), torch.arange(W, device=dev), indexing="ij")
+        xs = xs.float(); ys = ys.float()
+        tx = xs + dx                                       # (M,H,W)
+        ty = ys + dy
+        x0 = torch.floor(tx).long(); y0 = torch.floor(ty).long()
+        imp_max = imp.flatten(1).amax(1).clamp(min=1e-6).view(M, 1, 1)
+        imp_mult = torch.exp(beta * (imp / imp_max))       # (M,H,W) — foreground/fast wins
+        HW = H * W
+        color = torch.zeros(C, M * HW, device=dev)
+        weight = torch.zeros(M * HW, device=dev)
+        src = img.permute(1, 0, 2, 3).reshape(C, M * HW)
+        boff = (torch.arange(M, device=dev) * HW).view(M, 1, 1)     # per-batch index offset
+        r = int(math.ceil(hw))
+        for ox in range(1 - r, 1 + r):
+            for oy in range(1 - r, 1 + r):
+                xx = x0 + ox; yy = y0 + oy
+                wgt = (1 - (tx - xx.float()).abs() / hw).clamp(min=0) * \
+                    (1 - (ty - yy.float()).abs() / hw).clamp(min=0)
+                valid = (xx >= 0) & (xx < W) & (yy >= 0) & (yy < H)
+                wflat = (wgt * valid.float() * imp_mult).reshape(-1)
+                idx = ((yy * W + xx).clamp(0, HW - 1) + boff).reshape(-1)
+                color.index_add_(1, idx, src * wflat.unsqueeze(0))
+                weight.index_add_(0, idx, wflat)
+        out = (color / weight.clamp(min=1e-4)).reshape(C, M, H, W).permute(1, 0, 2, 3)
+        holes = (weight < 1e-4).reshape(M, H, W)
+        return out, holes
+
+    def forward_flow_prev_grid(mv_c, depth_c):
+        """
+        mv_c   : (N,H,W,2) motion vectors of frame n (backward: pos_old = pos + mv), pixels, (x, y)
+        depth_c: (N,H,W)   depth of frame n
+        returns flow (N,2,H,W) = forward flow of frame n-1 (px per render step), holes (N,H,W) bool
+        """
+        # 1) the values to store: forward displacement is the negated mv
+        val = (-mv_c).permute(0, 3, 1, 2).contiguous()           # (N,2,H,W)
+
+        # 2) where each frame-n pixel was in frame n-1: p_old = p + mv
+        dx, dy = mv_c[..., 0], mv_c[..., 1]                       # (N,H,W)
+
+        # 3) if several pixels land on the same old pixel, the nearer surface wins
+        imp = 1.0 / depth_c.clamp(min=0.1)                        # positive importance
+
+        # 4) scatter val to p + mv, bilinearly, weighted by depth
+        flow, holes = _splat_batch(val, dx, dy, imp, hw=1.0, beta=12.0)
+        return flow, holes
+
+    def fill_holes_nearest(flow, holes):
+        """flow (2,H,W), holes (H,W) bool (torch) -> numpy (2,H,W), holes copied from the nearest valid pixel"""
+        f = flow.cpu().numpy()
+        h = holes.cpu().numpy()
+        if h.any() and not h.all():
+            idx = distance_transform_edt(h, return_distances=False, return_indices=True)  # row/col of nearest non-hole
+            f = f[:, idx[0], idx[1]]
+        return f
+
+    def centroid(m):                       # m: (H,W) bool tensor on the GPU
+        ys, xs = torch.nonzero(m, as_tuple=True)
+        return torch.stack([xs.float().mean(), ys.float().mean()])
     
     def set_poses(t):
         observer = scene["observer"]
@@ -169,6 +238,27 @@ def main():
     
     # prev_snap = dvs.snapshot()
     # t_prev = 0.0
+    import torch.nn.functional as F
+
+    def mv_check(rgb_p, rgb_c, mv_c):
+        N, H, W, _ = rgb_c.shape
+        if mv_c.ndim == 3 and mv_c.shape[-1] != 2:
+            mv_c = mv_c.permute(1, 2, 0)
+        elif mv_c.ndim == 3 and mv_c.shape[0] == 2 and mv_c.shape[-1] == H:
+            # Defensive: accept a legacy (2, H, W) field and convert to (H, W, 2)
+            mv_c = mv_c.permute(1, 2, 0)
+
+        ys, xs = torch.meshgrid(torch.arange(H, device=mv_c.device),
+                                torch.arange(W, device=mv_c.device), indexing="ij")
+        gx = (xs + mv_c[..., 0]) / (W - 1) * 2 - 1
+        gy = (ys + mv_c[..., 1]) / (H - 1) * 2 - 1
+        grid = torch.stack((gx, gy), dim=-1).unsqueeze(0)  # (1, H, W, 2)
+        grid = grid.expand(N, -1, -1, -1)
+        rgb_p_chw = rgb_p.permute(0, 3, 1, 2)
+        rgb_c_chw = rgb_c.permute(0, 3, 1, 2)
+        warped = F.grid_sample(rgb_p_chw, grid, align_corners=True, padding_mode="border")
+        return (warped - rgb_c_chw).abs().mean().item()
+
 
     # Create a folder for the 40Hz ground truth masks
     gt_dir = "/media/vboxuser/T9/sim_data/ground_truth"
@@ -204,6 +294,8 @@ def main():
                             break
 
     frame_count = 0
+    tensor = None
+    flow_list = []
     while simulation_app.is_running():
         try:
         
@@ -228,20 +320,63 @@ def main():
                 color_tensor = torch.tensor(enemy_id, device=seg_tensor.device, dtype=seg_tensor.dtype)
                 # Check where the image pixels exactly match the RGBA color
                 binary_mask = (seg_tensor == color_tensor).all(dim=-1).cpu().numpy().astype(np.uint8)
+                if tensor is not None:
+                    tensor_old = tensor
+                tensor = (seg_tensor == color_tensor).all(dim=-1)
+
                 vis_mask = binary_mask * 255 
+
                 cv2.imshow("Ground Truth Mask", vis_mask)
                 # Save the mask frame
                 step_no = int(round((t_prev + dt) / dt))
-                np.save(f"{gt_dir}/mask_{step_no}.npy", binary_mask)
+                # np.save(f"{gt_dir}/mask_{step_no}.npy", binary_mask)
 
             # --- 5. SYNTHESIZE HIGH-FREQUENCY EVENTS (400Hz) ---
             cur_snap = dvs.snapshot()
-            rgb_c, mv_c, _ = cur_snap["dvs_cam"]
+            rgb_c, mv_c, depth_c = cur_snap["dvs_cam"]
             rgb_p = prev_snap["dvs_cam"][0]
-            if frame_count % 25 == 0:
-                print(f"[diag] f={frame_count} mv_max={mv_c.abs().max().item():.3f}px "
-                    f"mv_nonzero={(mv_c.abs().sum(-1) > 0).float().mean().item():.4f} "
-                    f"rgb_change={(rgb_c - rgb_p).abs().mean().item():.6f}")
+            if frame_count >= 1:   # frame 0's mv points back to a warmup frame that has no saved mask
+                flow_b, holes_b = forward_flow_prev_grid(mv_c, depth_c)
+                flow_prev = fill_holes_nearest(flow_b[0], holes_b[0])      # (2,H,W) float32, forward flow of frame n-1
+                flow_list.append(flow_prev.astype(np.float16))
+
+            if frame_count % 25 == 1:
+                # print(f"[diag] f={frame_count} mv_max={mv_c.abs().max().item():.3f}px "
+                #     f"mv_nonzero={(mv_c.abs().sum(-1) > 0).float().mean().item():.4f} "
+                #     f"rgb_change={(rgb_c - rgb_p).abs().mean().item():.6f}")
+                
+                # mv_c = np.squeeze(mv_c.cpu().numpy(), axis=0)  # Remove batch dimension
+                # mv_u = mv_c[:, :, 0]  # Horizontal motion vector
+                # mv_v = mv_c[:, :, 1]  # Vertical motion vector
+                # flow_h, flow_w = mv_u.shape
+                # step = max(1, min(flow_h, flow_w) // 24)
+                # yy, xx = np.mgrid[0:flow_h:step, 0:flow_w:step]
+                # quiver_u = mv_u[::step, ::step]
+                # quiver_v = mv_v[::step, ::step]
+                # mag = np.hypot(quiver_u, quiver_v)
+
+                # fig, ax = plt.subplots(figsize=(8, 6))
+                # ax.quiver(xx, yy, quiver_u, quiver_v,
+                #         np.hypot(quiver_u, quiver_v),                       # color arrows by magnitude
+                #         angles="xy", scale_units="xy", scale=1, cmap="plasma")
+                # ax.set_xlim(0, flow_w)
+                # ax.set_ylim(flow_h, 0)                                 # image coords: y down
+                # ax.set_aspect("equal")
+                # ax.axis("off")
+                # plt.tight_layout()
+                # # plt.show()
+                # fig.savefig(f"{gt_dir}/flow/flow_{step_no}.png", dpi=150)
+                # plt.close(fig)
+
+                # in the loop, keep last step's target mask as tgt_prev (torch bool), current one is tgt_cur
+                d = centroid(tensor) - centroid(tensor_old)        # how far the target moved, (x, y) px
+                m = mv_c[0][tensor].median(dim=0).values         # typical mv on target pixels, (x, y)
+                flow_t = torch.from_numpy(flow_list[-1].astype(np.float32)).to(tensor_old.device)   # (2,H,W)
+                flow_t = flow_t.permute(1, 2, 0)  # (H,W,2)
+                f = flow_t[tensor_old].median(dim=0).values
+                # print("target moved", d.tolist(), "| mv on target", m.tolist(), " | new flow", f.tolist())
+
+                print(mv_check(rgb_p, rgb_c, mv_c[0]), (rgb_p - rgb_c).abs().mean().item())
             dvs.warp_and_process(prev_snap, cur_snap, K, t_prev, dt_fine)
             
             # Advance time
